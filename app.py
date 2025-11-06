@@ -1,0 +1,192 @@
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import os, httpx, json, hashlib, time
+from dotenv import load_dotenv
+
+# ---------- env & config ----------
+load_dotenv()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # optional for mock
+SMS_API_BASE   = os.getenv("SMS_API_BASE", "https://sms-gateway.example.com")
+SMS_API_KEY    = os.getenv("SMS_API_KEY", "dev-mock-key")
+SENDER_ID      = os.getenv("SENDER_ID", "27820000000")
+SUPPORT_PHONE  = os.getenv("SUPPORT_PHONE", "0X-XXX-XXXX")
+SUPPORT_EMAIL  = os.getenv("SUPPORT_EMAIL", "bongaai.support@gmail.com")
+PRICING_COPY   = os.getenv("PRICING_COPY", "R1/SMS received (std rates apply)")
+USE_MOCK_SEND  = os.getenv("USE_MOCK_SEND", "true").lower() == "true"
+FAKE_AI_MODE   = os.getenv("FAKE_AI_MODE", "true").lower() == "true" or not OPENAI_API_KEY
+
+STORE_FILE     = os.getenv("STORE_FILE", "store.json")
+
+app = FastAPI(title="BongaAI SMS MVP")
+
+# ---------- tiny store (json) ----------
+def _load_store():
+    if not os.path.exists(STORE_FILE):
+        with open(STORE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"users":{}, "logs":[]}, f)
+    with open(STORE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def _save_store(store):
+    with open(STORE_FILE, "w", encoding="utf-8") as f:
+        json.dump(store, f, indent=2)
+
+def _hash_msisdn(msisdn: str) -> str:
+    return hashlib.sha256(msisdn.encode("utf-8")).hexdigest()
+
+# ---------- helpers ----------
+def split_for_sms(text: str):
+    # GSM-7-ish simple splitter (keeps it simple for MVP)
+    limit_first = 160
+    limit_next  = 153
+    parts = []
+    text = (text or "").strip()
+    while text:
+        parts.append(text[:limit_first])
+        text = text[limit_first:]
+        limit_first = limit_next
+    return parts or [""]
+
+async def ai_reply(user_text: str) -> str:
+    """Mock by default. If you set OPENAI_API_KEY and FAKE_AI_MODE=false, it will call OpenAI."""
+    if FAKE_AI_MODE:
+        # keep it short to mimic SMS
+        return f"(mock) You said: {user_text[:200]}"
+    # Real OpenAI call (kept minimal; you can switch models later)
+    import openai  # lazy import
+    openai.api_key = OPENAI_API_KEY
+    resp = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role":"system","content":"You are BongaAI, an SMS assistant in South Africa. Keep answers under 3 SMS parts, plain text."},
+            {"role":"user","content": user_text}
+        ],
+        max_tokens=300,
+        temperature=0.2
+    )
+    return resp["choices"][0]["message"]["content"].strip()
+
+async def send_sms(to_msisdn: str, text: str):
+    """Sends SMS via provider. In mock mode, write to outbox.log instead."""
+    parts = split_for_sms(text)
+    if USE_MOCK_SEND:
+        with open("outbox.log","a",encoding="utf-8") as f:
+            for p in parts:
+                f.write(f"{int(time.time())}|MOCK_SEND|to={to_msisdn}|from={SENDER_ID}|{p}\n")
+        return
+
+    # Example generic POST. Adjust fields to match SMSPortal when you switch to live.
+    headers = {"Authorization": f"Bearer {SMS_API_KEY}"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        for p in parts:
+            payload = {
+                "to":   to_msisdn,     # may be "msisdn" or "destination" in some APIs
+                "from": SENDER_ID,     # may be "sender" or omitted if configured server-side
+                "text": p
+            }
+            r = await client.post(f"{SMS_API_BASE}/messages", json=payload, headers=headers)
+            r.raise_for_status()
+
+def welcome_text():
+    return (f"BongaAI: AI over SMS. Cost {PRICING_COPY}. "
+            f"Reply HELP for help, STOP to cancel. Support {SUPPORT_PHONE} • {SUPPORT_EMAIL}")
+
+def help_text():
+    return (f"BongaAI answers questions by SMS. Cost {PRICING_COPY}. "
+            f"Reply STOP to cancel. Support {SUPPORT_PHONE} • {SUPPORT_EMAIL}")
+
+def get_user(store, msisdn):
+    h = _hash_msisdn(msisdn)
+    users = store.get("users", {})
+    if h not in users:
+        users[h] = {"msisdn_hash": h, "welcome_sent": False, "opted_out": False, "lang": "en", "last_seen": int(time.time())}
+        store["users"] = users
+    return users[h], h
+
+def log_event(store, direction, msisdn, text, extra=None):
+    store["logs"].append({
+        "ts": int(time.time()),
+        "direction": direction,
+        "msisdn_hash": _hash_msisdn(msisdn),
+        "text": (text or "")[:800],
+        "extra": extra or {}
+    })
+
+# ---------- routes ----------
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.post("/sms/inbound")
+async def inbound(request: Request):
+    # handle both form and json
+    content_type = request.headers.get("content-type","")
+    if "application/json" in content_type:
+        data = await request.json()
+        from_msisdn = data.get("from") or data.get("msisdn") or data.get("sender")
+        text = (data.get("text") or data.get("message") or "").strip()
+    else:
+        form = await request.form()
+        from_msisdn = form.get("from") or form.get("msisdn") or form.get("sender")
+        text = (form.get("text") or form.get("message") or "").strip()
+
+    if not from_msisdn:
+        return JSONResponse({"ok": False, "reason":"missing sender"}, status_code=400)
+
+    store = _load_store()
+    user, user_key = get_user(store, from_msisdn)
+    user["last_seen"] = int(time.time())
+
+    low = (text or "").lower()
+
+    # compliance keywords
+    if low in ("stop","unsubscribe","cancel"):
+        user["opted_out"] = True
+        _save_store(store)
+        await send_sms(from_msisdn, "You’re unsubscribed. No further messages. HELP for info.")
+        log_event(store, "MT", from_msisdn, "STOP confirm")
+        _save_store(store)
+        return {"ok": True}
+
+    if user.get("opted_out"):
+        # do not reply if opted-out
+        log_event(store, "BLOCK", from_msisdn, text, {"reason":"opted_out"})
+        _save_store(store)
+        return {"ok": True}
+
+    if low in ("help","info"):
+        await send_sms(from_msisdn, help_text())
+        log_event(store, "MT", from_msisdn, "HELP")
+        _save_store(store)
+        return {"ok": True}
+
+    # welcome (once)
+    if not user.get("welcome_sent"):
+        await send_sms(from_msisdn, welcome_text())
+        user["welcome_sent"] = True
+
+    # (Optional) rate limit & credit checks go here
+
+    # AI reply
+    answer = await ai_reply(text)
+    # keep it tight (approx 3 parts)
+    if len(answer) > 480:
+        answer = answer[:477] + "..."
+
+    await send_sms(from_msisdn, answer)
+
+    log_event(store, "MO", from_msisdn, text)
+    log_event(store, "MT", from_msisdn, answer)
+    _save_store(store)
+    return {"ok": True}
+
+@app.post("/sms/dlr")
+async def dlr(_: Request):
+    # delivery receipts could be stored here
+    return {"ok": True}
+
+@app.post("/billing/callback")
+async def billing(_: Request):
+    # handle DCB callbacks later
+    return {"ok": True}

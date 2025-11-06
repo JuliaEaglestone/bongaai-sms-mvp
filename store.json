@@ -1,0 +1,34 @@
+{
+  "users": {
+    "b1a85aab644dc5fe9d839339ffb2b0ec091027f4eb5da3a4c8373e4cdeccadbe": {
+      "msisdn_hash": "b1a85aab644dc5fe9d839339ffb2b0ec091027f4eb5da3a4c8373e4cdeccadbe",
+      "welcome_sent": true,
+      "opted_out": false,
+      "lang": "en",
+      "last_seen": 1762431138
+    }
+  },
+  "logs": [
+    {
+      "ts": 1762421639,
+      "direction": "MT",
+      "msisdn_hash": "b1a85aab644dc5fe9d839339ffb2b0ec091027f4eb5da3a4c8373e4cdeccadbe",
+      "text": "HELP",
+      "extra": {}
+    },
+    {
+      "ts": 1762431138,
+      "direction": "MO",
+      "msisdn_hash": "b1a85aab644dc5fe9d839339ffb2b0ec091027f4eb5da3a4c8373e4cdeccadbe",
+      "text": "write a 3-line poem about rain",
+      "extra": {}
+    },
+    {
+      "ts": 1762431138,
+      "direction": "MT",
+      "msisdn_hash": "b1a85aab644dc5fe9d839339ffb2b0ec091027f4eb5da3a4c8373e4cdeccadbe",
+      "text": "(mock) You said: write a 3-line poem about rain",
+      "extra": {}
+    }
+  ]
+}
