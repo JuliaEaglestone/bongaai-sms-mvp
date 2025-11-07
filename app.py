@@ -120,19 +120,40 @@ def health():
 
 @app.post("/sms/inbound")
 async def inbound(request: Request):
-    # handle both form and json
-    content_type = request.headers.get("content-type","")
+    # Robust content-type handling:
+    # 1) If header says JSON -> parse JSON.
+    # 2) If header says form-encoded -> parse form (needs python-multipart installed).
+    # 3) If header is missing/wrong -> try JSON first, then fall back to form.
+
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    from_msisdn, text = None, ""
+
     if "application/json" in content_type:
         data = await request.json()
         from_msisdn = data.get("from") or data.get("msisdn") or data.get("sender")
         text = (data.get("text") or data.get("message") or "").strip()
-    else:
+
+    elif "application/x-www-form-urlencoded" in content_type:
+        # Note: requires python-multipart in requirements.txt to avoid runtime error
         form = await request.form()
         from_msisdn = form.get("from") or form.get("msisdn") or form.get("sender")
         text = (form.get("text") or form.get("message") or "").strip()
 
+    else:
+        # Header missing or odd → try JSON, then form as a fallback
+        try:
+            data = await request.json()
+            from_msisdn = data.get("from") or data.get("msisdn") or data.get("sender")
+            text = (data.get("text") or data.get("message") or "").strip()
+        except Exception:
+            # If this raises "python-multipart required", add it to requirements.txt
+            form = await request.form()
+            from_msisdn = form.get("from") or form.get("msisdn") or form.get("sender")
+            text = (form.get("text") or form.get("message") or "").strip()
+
     if not from_msisdn:
-        return JSONResponse({"ok": False, "reason":"missing sender"}, status_code=400)
+        return JSONResponse({"ok": False, "reason": "missing sender"}, status_code=400)
 
     store = _load_store()
     user, user_key = get_user(store, from_msisdn)
@@ -150,8 +171,7 @@ async def inbound(request: Request):
         return {"ok": True}
 
     if user.get("opted_out"):
-        # do not reply if opted-out
-        log_event(store, "BLOCK", from_msisdn, text, {"reason":"opted_out"})
+        log_event(store, "BLOCK", from_msisdn, text, {"reason": "opted_out"})
         _save_store(store)
         return {"ok": True}
 
@@ -161,16 +181,13 @@ async def inbound(request: Request):
         _save_store(store)
         return {"ok": True}
 
-    # welcome (once)
+    # welcome once
     if not user.get("welcome_sent"):
         await send_sms(from_msisdn, welcome_text())
         user["welcome_sent"] = True
 
-    # (Optional) rate limit & credit checks go here
-
     # AI reply
     answer = await ai_reply(text)
-    # keep it tight (approx 3 parts)
     if len(answer) > 480:
         answer = answer[:477] + "..."
 
