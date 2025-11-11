@@ -128,6 +128,7 @@ async def inbound(request: Request):
     content_type = (request.headers.get("content-type") or "").lower()
 
     from_msisdn, text = None, ""
+    data, form = None, None
 
     if "application/json" in content_type:
         data = await request.json()
@@ -141,21 +142,44 @@ async def inbound(request: Request):
         text = (form.get("text") or form.get("message") or "").strip()
 
     else:
-        # Header missing or odd → try JSON, then form as a fallback
+        # Header missing or odd → try JSON, then fall back to form
         try:
             data = await request.json()
             from_msisdn = data.get("from") or data.get("msisdn") or data.get("sender")
             text = (data.get("text") or data.get("message") or "").strip()
         except Exception:
-            # If this raises "python-multipart required", add it to requirements.txt
             form = await request.form()
             from_msisdn = form.get("from") or form.get("msisdn") or form.get("sender")
             text = (form.get("text") or form.get("message") or "").strip()
 
+    # ---------- Inbound idempotency (drop duplicate deliveries) ----------
+    store = _load_store()  # load early so we can record seen ids
+    mid = None
+    if isinstance(data, dict):
+        mid = (data.get("messageId") or data.get("id") or data.get("msgid"))
+    if not mid and form is not None:
+        mid = (form.get("messageId") or form.get("id") or form.get("msgid"))
+
+    seen = store.setdefault("seen", {})
+    now = int(time.time())
+
+    # purge >24h to keep file small
+    for k, t in list(seen.items()):
+        if now - t > 24*3600:
+            seen.pop(k, None)
+
+    if mid and mid in seen:
+        return {"ok": True}  # already handled; ack fast
+
+    if mid:
+        seen[mid] = now
+        store["seen"] = seen
+        _save_store(store)
+    # ---------------------------------------------------------------
+
     if not from_msisdn:
         return JSONResponse({"ok": False, "reason": "missing sender"}, status_code=400)
 
-    store = _load_store()
     user, user_key = get_user(store, from_msisdn)
     user["last_seen"] = int(time.time())
 
