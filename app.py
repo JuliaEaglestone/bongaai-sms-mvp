@@ -73,7 +73,9 @@ async def send_sms(to_msisdn: str, text: str):
     if USE_MOCK_SEND:
         with open("outbox.log","a",encoding="utf-8") as f:
             for p in parts:
-                f.write(f"{int(time.time())}|MOCK_SEND|to={to_msisdn}|from={SENDER_ID}|{p}\n")
+                line = f"{int(time.time())}|MOCK_SEND|to={to_msisdn}|from={SENDER_ID}|{p}"
+                f.write(line + "\n")
+                print(line)  # <-- this line makes it visible in Render logs
         return
 
     # Example generic POST. Adjust fields to match SMSPortal when you switch to live.
