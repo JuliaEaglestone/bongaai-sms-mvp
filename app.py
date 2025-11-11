@@ -152,6 +152,7 @@ async def inbound(request: Request):
             from_msisdn = form.get("from") or form.get("msisdn") or form.get("sender")
             text = (form.get("text") or form.get("message") or "").strip()
 
+        
     # ---------- Inbound idempotency (drop duplicate deliveries) ----------
     store = _load_store()  # load early so we can record seen ids
     mid = None
@@ -159,6 +160,12 @@ async def inbound(request: Request):
         mid = (data.get("messageId") or data.get("id") or data.get("msgid"))
     if not mid and form is not None:
         mid = (form.get("messageId") or form.get("id") or form.get("msgid"))
+
+    # Fallback when provider omits messageId: make a 60s-bucket fingerprint
+    if not mid:
+        bucket = int(time.time()) // 60  # 60-second window
+        raw = f"{from_msisdn}|{(text or '')[:40]}|{bucket}"
+        mid = "fk:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
     seen = store.setdefault("seen", {})
     now = int(time.time())
@@ -168,9 +175,13 @@ async def inbound(request: Request):
         if now - t > 24*3600:
             seen.pop(k, None)
 
-    if mid and mid in seen:
-        return {"ok": True}  # already handled; ack fast
+    # if already handled, log and ACK fast (prevents double costs)
+    if mid in seen:
+        log_event(store, "DUP", from_msisdn, text, {"messageId": mid})
+        _save_store(store)
+        return {"ok": True}
 
+    # remember this id so a retry won't reprocess
     if mid:
         seen[mid] = now
         store["seen"] = seen
