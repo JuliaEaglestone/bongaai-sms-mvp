@@ -113,6 +113,26 @@ def log_event(store, direction, msisdn, text, extra=None):
         "extra": extra or {}
     })
 
+# ---- rate limits ----
+DAY_SECS = 24*60*60
+def can_proceed(store, msisdn, per_hour=20, per_day=200):
+    h = _hash_msisdn(msisdn)
+    rl = store.setdefault("ratelimit", {})
+    u = rl.setdefault(h, {"hour": {"t": 0, "n": 0}, "day": {"t": 0, "n": 0}})
+    now = int(time.time())
+    hb, db = now // 3600, now // DAY_SECS
+    if u["hour"]["t"] != hb:
+        u["hour"] = {"t": hb, "n": 0}
+    if u["day"]["t"]  != db:
+        u["day"]  = {"t": db, "n": 0}
+    if u["hour"]["n"] >= per_hour or u["day"]["n"] >= per_day:
+        return False
+    u["hour"]["n"] += 1
+    u["day"]["n"]  += 1
+    rl[h] = u
+    store["ratelimit"] = rl
+    return True
+
 # ---------- routes ----------
 @app.get("/health")
 def health():
@@ -220,6 +240,13 @@ async def inbound(request: Request):
     if not user.get("welcome_sent"):
         await send_sms(from_msisdn, welcome_text())
         user["welcome_sent"] = True
+
+    # rate-limit guard (protect costs)
+    if not can_proceed(store, from_msisdn, per_hour=20, per_day=200):
+        await send_sms(from_msisdn, "BongaAI: You’ve hit today’s limit. Try again later.")
+        log_event(store, "MT", from_msisdn, "rate-limit notice")
+        _save_store(store)
+        return {"ok": True}
 
     # AI reply
     answer = await ai_reply(text)
