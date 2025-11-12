@@ -49,23 +49,31 @@ def split_for_sms(text: str):
     return parts or [""]
 
 async def ai_reply(user_text: str) -> str:
-    """Mock by default. If you set OPENAI_API_KEY and FAKE_AI_MODE=false, it will call OpenAI."""
+    """Single-SMS answer (<=150 chars), ASCII only."""
+    sys = (
+        "You are BongaAI, an SMS assistant in South Africa. "
+        "Reply in plain ASCII, <=150 characters, one short sentence. "
+        "No emojis. No bullet points. No greetings. Be direct."
+    )
+
     if FAKE_AI_MODE:
-        # keep it short to mimic SMS
-        return f"(mock) You said: {user_text[:200]}"
-    # Real OpenAI call (kept minimal; you can switch models later)
-    import openai  # lazy import
+        ans = f"(mock) {user_text.strip()[:120]}"
+        ans = (ans[:147] + "...") if len(ans) > 150 else ans
+        return ans.encode("ascii", "ignore").decode("ascii")
+
+    import openai
     openai.api_key = OPENAI_API_KEY
     resp = openai.ChatCompletion.create(
         model="gpt-4o-mini",
-        messages=[
-            {"role":"system","content":"You are BongaAI, an SMS assistant in South Africa. Keep answers under 3 SMS parts, plain text."},
-            {"role":"user","content": user_text}
-        ],
-        max_tokens=300,
-        temperature=0.2
+        messages=[{"role":"system","content": sys},
+              {"role":"user","content": user_text}],
+        max_tokens=120,
+        temperature=0.2,
     )
-    return resp["choices"][0]["message"]["content"].strip()
+    ans = resp["choices"][0]["message"]["content"].strip()
+    if len(ans) > 150:
+        ans = ans[:147] + "..."
+    return ans.encode("ascii", "ignore").decode("ascii")
 
 async def send_sms(to_msisdn: str, text: str):
     """Sends SMS via provider. In mock mode, write to outbox.log instead."""
@@ -252,8 +260,11 @@ async def inbound(request: Request):
 
     # AI reply
     answer = await ai_reply(text)
-    if len(answer) > 480:
-        answer = answer[:477] + "..."
+    answer = answer[:160] # guarantee single segment
+
+    MORE_HINT = "Reply MORE for extra detail (cost applies)."
+    if len(answer) <= 130 and len(answer + " " + MORE_HINT) <= 160:
+        answer = (answer + " " + MORE_HINT).strip()
 
     await send_sms(from_msisdn, answer)
 
