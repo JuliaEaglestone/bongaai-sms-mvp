@@ -57,9 +57,12 @@ async def ai_reply(user_text: str) -> str:
     )
 
     if FAKE_AI_MODE:
-        ans = f"(mock) {user_text.strip()[:120]}"
-        ans = (ans[:147] + "...") if len(ans) > 150 else ans
+        # use the full text, then enforce the same 150-char rule
+        ans = f"(mock) {user_text.strip()}"
+        if len(ans) > 150:
+            ans = ans[:147].rstrip() + "..."
         return ans.encode("ascii", "ignore").decode("ascii")
+
 
     import openai
     openai.api_key = OPENAI_API_KEY
