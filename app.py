@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-import os, httpx, json, hashlib, time
+import os, httpx, json, hashlib, time, httpx, re
 from dotenv import load_dotenv
 
 # ---------- env & config ----------
@@ -75,26 +75,44 @@ async def ai_reply(user_text: str) -> str:
         ans = ans[:147] + "..."
     return ans.encode("ascii", "ignore").decode("ascii")
 
+_ws_collapse = re.compile(r"\s+")
+
 async def send_sms(to_msisdn: str, text: str):
-    """Sends SMS via provider. In mock mode, write to outbox.log instead."""
-    parts = split_for_sms(text)
+    """
+    Sends SMS via provider. In mock mode, write to outbox.log.
+    - Normalize to ASCII + collapse whitespace
+    - Final hard slice to 160 chars (network safety)
+    - Split after normalization so parts reflect the safe text
+    - Log len + text for verification
+    """
+    # normalize to ASCII
+    safe_text = _ws_collapse.sub(" ", (text or "")).strip()
+    safe_text = safe_text.encode("ascii", "ignore").decode("ascii")
+
+    # final network safety cap
+    if len(safe_text) > 160:
+        safe_text = safe_text[:160]
+
+    # keep your splitter
+    parts = split_for_sms(safe_text) or [safe_text]
+
     if USE_MOCK_SEND:
-        with open("outbox.log","a",encoding="utf-8") as f:
+        import time
+        with open("outbox.log", "a", encoding="utf-8") as f:
             for p in parts:
-                line = f"{int(time.time())}|MOCK_SEND|to={to_msisdn}|from={SENDER_ID}|{p}"
+                line = (
+                    f"{int(time.time())}|MOCK_SEND|to={to_msisdn}|from={SENDER_ID}"
+                    f"|len={len(p)}|text={p!r}"
+                )
                 f.write(line + "\n")
-                print(line)  # <-- this line makes it visible in Render logs
+                print(line)  # visible in Render logs
         return
 
-    # Example generic POST. Adjust fields to match SMSPortal when you switch to live.
+    # real provider send (async)
     headers = {"Authorization": f"Bearer {SMS_API_KEY}"}
     async with httpx.AsyncClient(timeout=15) as client:
         for p in parts:
-            payload = {
-                "to":   to_msisdn,     # may be "msisdn" or "destination" in some APIs
-                "from": SENDER_ID,     # may be "sender" or omitted if configured server-side
-                "text": p
-            }
+            payload = {"to": to_msisdn, "from": SENDER_ID, "text": p}
             r = await client.post(f"{SMS_API_BASE}/messages", json=payload, headers=headers)
             r.raise_for_status()
 
@@ -259,13 +277,9 @@ async def inbound(request: Request):
         return {"ok": True}
 
     # AI reply
+    # AI reply (ASCII & ≤150 handled inside ai_reply; 160 cap is transport safety)
     answer = await ai_reply(text)
-    answer = answer[:160] # guarantee single segment
-
-    MORE_HINT = "Reply MORE for extra detail (cost applies)."
-    if len(answer) <= 130 and len(answer + " " + MORE_HINT) <= 160:
-        answer = (answer + " " + MORE_HINT).strip()
-
+    answer = answer[:160]
     await send_sms(from_msisdn, answer)
 
     log_event(store, "MO", from_msisdn, text)
